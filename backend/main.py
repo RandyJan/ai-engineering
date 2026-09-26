@@ -5,6 +5,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from google import genai
 from google.genai import errors, types
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 load_dotenv()
 
@@ -20,6 +22,15 @@ app = FastAPI(
     version="1.0.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Temporary in-memory storage
 conversations = {}
@@ -100,6 +111,7 @@ def chat_endpoint(request: ChatRequest):
 )
 def extract_employee(request: EmployeeExtractionRequest):
 
+
     try:
 
         response = client.models.generate_content(
@@ -143,7 +155,46 @@ def extract_employee(request: EmployeeExtractionRequest):
 
     except errors.ServerError:
 
+
         raise HTTPException(
+
             status_code=503,
             detail="The LLM service is temporarily unavailable."
         )
+@app.post("/api/chat/stream") 
+def chat_stream(request: ChatRequest):
+
+    if request.conversation_id not in conversations:
+
+        conversations[request.conversation_id] = client.chats.create(
+            model="gemini-3.8-flash",
+
+            config=types.GenerateContentConfig(
+                system_instruction="""
+                You are an AI assistant for an employee management system.
+
+                Rules:
+                - Keep answers clear and professional.
+                - Never invent employee information.
+                - If information is unavailable, clearly say so.
+                """
+            ),
+        )
+
+    chat = conversations[request.conversation_id]
+
+    def generate():
+
+        response = chat.send_message_stream(
+            request.message
+        )
+
+        for chunk in response:
+
+            if chunk.text:
+                yield chunk.text
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/plain"
+    )
