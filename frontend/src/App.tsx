@@ -80,7 +80,22 @@ function App() {
           { stream: true }
         );
 
-        console.log(chunk);
+        console.log("Received chunk:", chunk);
+
+        setMessages((current) => {
+          const updated = [...current];
+
+          const lastMessage = updated[updated.length - 1];
+
+          if (lastMessage?.role === "assistant") {
+            updated[updated.length - 1] = {
+              ...lastMessage,
+              content: lastMessage.content + chunk,
+            };
+          }
+
+          return updated;
+        });
       }
     } finally {
       setIsLoading(false);

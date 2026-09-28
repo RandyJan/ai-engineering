@@ -7,15 +7,26 @@ from google import genai
 from google.genai import errors, types
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Literal
+from groq import Groq
+
+
 
 load_dotenv()
 
-api_key = os.getenv("GEMINI_API_KEY")
-
-if not api_key:
+gemini_client = os.getenv("GEMINI_API_KEY")
+groq_api_key = os.getenv("GROQ_API_KEY")
+if not gemini_client:
     raise ValueError("GEMINI_API_KEY is not configured.")
 
-client = genai.Client(api_key=api_key)
+if not groq_api_key:
+    raise ValueError("GROQ_API_KEY is not configured.")
+
+gemini_client = genai.Client(api_key=gemini_client)
+
+groq_client = Groq(
+    api_key=groq_api_key
+)
 
 app = FastAPI(
     title="LLM Learning API",
@@ -34,12 +45,24 @@ app.add_middleware(
 
 # Temporary in-memory storage
 conversations = {}
+GROQ_MODEL = os.getenv(
+    "GROQ_MODEL",
+    "openai/gpt-oss-20b"
+)
+SYSTEM_INSTRUCTION = """
+You are an AI assistant for an employee management system.
+
+Rules:
+- Keep answers clear and professional.
+- Never invent employee information.
+- If information is unavailable, clearly say so.
+"""
 
 
 class ChatRequest(BaseModel):
     conversation_id: str
     message: str
-
+    provider: Literal["gemini", "groq"] = "groq"
 
 class ChatResponse(BaseModel):
     answer: str
@@ -68,7 +91,7 @@ def chat_endpoint(request: ChatRequest):
         # Create conversation if it doesn't exist
         if request.conversation_id not in conversations:
 
-            conversations[request.conversation_id] = client.chats.create(
+            conversations[request.conversation_id] = gemini_client.chats.create(
                 model="gemini-3.8-flash",
              
 
@@ -114,7 +137,7 @@ def extract_employee(request: EmployeeExtractionRequest):
 
     try:
 
-        response = client.models.generate_content(
+        response = gemini_client.models.generate_content(
             model="gemini-3.8-flash",
 
             contents=request.text,
@@ -164,37 +187,111 @@ def extract_employee(request: EmployeeExtractionRequest):
 @app.post("/api/chat/stream") 
 def chat_stream(request: ChatRequest):
 
-    if request.conversation_id not in conversations:
-
-        conversations[request.conversation_id] = client.chats.create(
-            model="gemini-3.8-flash",
-
-            config=types.GenerateContentConfig(
-                system_instruction="""
-                You are an AI assistant for an employee management system.
-
-                Rules:
-                - Keep answers clear and professional.
-                - Never invent employee information.
-                - If information is unavailable, clearly say so.
-                """
-            ),
-        )
-
-    chat = conversations[request.conversation_id]
-
     def generate():
 
-        response = chat.send_message_stream(
-            request.message
+        yield from stream_llm(
+            provider=request.provider,
+            message=request.message,
         )
-
-        for chunk in response:
-
-            if chunk.text:
-                yield chunk.text
 
     return StreamingResponse(
         generate(),
-        media_type="text/plain"
+        media_type="text/plain",
     )
+def stream_llm(
+    provider: str,
+    message: str,
+):
+    if provider == "gemini":
+        yield from stream_gemini(message)
+
+    elif provider == "groq":
+        yield from stream_groq(message)
+
+    else:
+        yield "[Unsupported LLM provider.]"
+def stream_groq(message: str):
+    try:
+        print(f"Starting Groq stream using {GROQ_MODEL}...")
+
+        stream = groq_client.chat.completions.create(
+             model="qwen/qwen3.8-27b",
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_INSTRUCTION,
+                },
+                {
+                    "role": "user",
+                    "content": message,
+                },
+            ],
+            stream=True,
+        )
+
+        for chunk in stream:
+            content = chunk.choices[0].delta.content
+
+            if content:
+                print("GROQ CHUNK:", repr(content))
+                yield content
+
+        print("Groq stream completed.")
+
+    except Exception as error:
+        print("GROQ ERROR:", repr(error))
+        yield f"\n[Groq error: {str(error)}]"
+    # try:
+    #     print("Starting Groq stream...")
+
+    #     stream = groq_client.chat.completions.create(
+    #             model="qwen/qwen3.8-27b",
+    #         messages=[
+    #             {
+    #                 "role": "system",
+    #                 "content": SYSTEM_INSTRUCTION,
+    #             },
+    #             {
+    #                 "role": "user",
+    #                 "content": message,
+    #             },
+    #         ],
+    #         stream=True,
+    #     )
+
+    #     for chunk in stream:
+    #         content = chunk.choices[0].delta.content
+
+    #         if content:
+    #             print("GROQ CHUNK:", repr(content))
+    #             yield content
+
+    #     print("Groq stream completed.")
+
+    except Exception as error:
+        print("GROQ ERROR TYPE:", type(error).__name__)
+        print("GROQ ERROR:", repr(error))
+
+        yield f"\n[Groq error: {str(error)}]"
+
+    except Exception as error:
+        print("Groq error:", repr(error))
+        yield "\n[Groq is currently unavailable.]"
+def stream_gemini(message: str):
+    try:
+        response = gemini_client.models.generate_content_stream(
+            model="gemini-3.8-flash",
+            contents=message,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION
+            ),
+        )
+
+        for chunk in response:
+            if chunk.text:
+                yield chunk.text
+
+    except Exception as error:
+        print("Gemini error:", repr(error))
+        yield "\n[Gemini is currently unavailable.]"
+        
